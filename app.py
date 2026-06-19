@@ -127,15 +127,9 @@ with tab_btc:
     render_beta_tab(returns, selected, window, mask, "BTC", "BTC")
 
 with tab_mkt:
-    choice = st.radio(
-        "Compare against", [MKT_LABEL, "BTC"], horizontal=True,
-        help="Switch the benchmark used for the beta calculation in this tab.",
-    )
-    bench = MKT_COL if choice == MKT_LABEL else "BTC"
-    render_beta_tab(returns, selected, window, mask, bench, choice)
-    if bench == MKT_COL:
-        st.caption("Benchmark = cap-weighted index of 30+ large alts (SOL, BNB, XRP, "
-                   "ADA, DOGE, TRX, AVAX, LINK, …), excl. BTC, ETH & stablecoins.")
+    render_beta_tab(returns, selected, window, mask, MKT_COL, MKT_LABEL)
+    st.caption("Benchmark = cap-weighted index of 30+ large alts (SOL, BNB, XRP, "
+               "ADA, DOGE, TRX, AVAX, LINK, …), excl. BTC, ETH & stablecoins.")
 
 # ── Coverage + methodology ───────────────────────────────────────────────────
 with st.expander("ℹ️ Data coverage & methodology"):
