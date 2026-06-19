@@ -1,4 +1,4 @@
-"""Crypto Beta Dashboard — rolling beta of altcoins vs BTC.
+"""Crypto Beta Dashboard — rolling beta of altcoins vs a chosen benchmark.
 
 Run:  streamlit run app.py
 """
@@ -12,121 +12,147 @@ import streamlit as st
 
 import fetch_data
 
-DATA_CSV = pathlib.Path(__file__).parent / "data" / "prices.csv"
-BENCHMARK = "BTC"
+DATA_CSV = fetch_data.DATA_CSV
+MKT_CSV = fetch_data.MKT_CSV
+MKT_COL = fetch_data.MKT_COL
+MKT_LABEL = "Marketcap (excl BTC, ETH)"
 
-st.set_page_config(page_title="Crypto Beta vs BTC", layout="wide")
+st.set_page_config(page_title="Crypto Beta", layout="wide")
 
 
 @st.cache_data(show_spinner=False)
-def load_prices() -> pd.DataFrame:
-    if DATA_CSV.exists():
-        df = pd.read_csv(DATA_CSV, index_col=0, parse_dates=True)
-    else:
-        df = fetch_data.get_price_matrix()
-        DATA_CSV.parent.mkdir(exist_ok=True)
-        df.to_csv(DATA_CSV)
-    return df.sort_index()
+def load_data() -> pd.DataFrame:
+    """Token prices joined with the altcoin-marketcap benchmark index."""
+    if not DATA_CSV.exists():
+        fetch_data.update_price_matrix()
+    prices = pd.read_csv(DATA_CSV, index_col=0, parse_dates=True).sort_index()
+    if not MKT_CSV.exists():
+        fetch_data.update_alt_prices()
+        fetch_data.build_marketcap_index()
+    mkt = pd.read_csv(MKT_CSV, index_col=0, parse_dates=True).sort_index()
+    return prices.join(mkt[[MKT_COL]])
 
 
-def refresh_prices() -> None:
-    fetch_data.update_price_matrix(DATA_CSV)
-    load_prices.clear()
+def refresh_data() -> None:
+    fetch_data.update_price_matrix()
+    fetch_data.update_alt_prices()
+    fetch_data.build_marketcap_index()
+    load_data.clear()
 
 
-def rolling_beta(prices: pd.DataFrame, token: str, window: int) -> pd.Series:
-    """beta = Cov(r_token, r_btc) / Var(r_btc) over a rolling window of daily returns."""
-    rets = prices[[token, BENCHMARK]].pct_change()
-    cov = rets[token].rolling(window).cov(rets[BENCHMARK])
-    var = rets[BENCHMARK].rolling(window).var()
+def rolling_beta(returns: pd.DataFrame, token: str, benchmark: str,
+                 window: int) -> pd.Series:
+    """beta = Cov(r_token, r_bench) / Var(r_bench) over a rolling window."""
+    cov = returns[token].rolling(window).cov(returns[benchmark])
+    var = returns[benchmark].rolling(window).var()
     return cov / var
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────
+def render_beta_tab(returns: pd.DataFrame, selected: list[str], window: int,
+                    mask: pd.Series, benchmark: str, bench_label: str) -> None:
+    """Shared layout: beta line chart + latest-beta metrics for one benchmark."""
+    if not selected:
+        st.info("Pick one or more tokens in the sidebar to plot their beta.")
+        return
+
+    fig = go.Figure()
+    latest: dict[str, float] = {}
+    for tok in selected:
+        if tok == benchmark:
+            continue
+        beta = rolling_beta(returns, tok, benchmark, window).loc[mask].dropna()
+        if beta.empty:
+            continue
+        fig.add_trace(go.Scatter(x=beta.index, y=beta.values, mode="lines", name=tok))
+        latest[tok] = beta.iloc[-1]
+
+    fig.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                  annotation_text=f"β = 1 (moves with {bench_label})")
+    fig.add_hline(y=0.0, line_dash="dot", line_color="lightgray")
+    fig.update_layout(
+        height=560, hovermode="x unified",
+        yaxis_title=f"{window}-day rolling β", xaxis_title="Date",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    if latest:
+        st.subheader("Latest β")
+        cols = st.columns(len(latest))
+        for col, (tok, val) in zip(cols, latest.items()):
+            col.metric(tok, f"{val:.2f}")
+
+
+# ── Sidebar (shared controls) ───────────────────────────────────────────────
 st.sidebar.title("⚙️ Controls")
 
-prices = load_prices()
-candidates = [c for c in prices.columns if c != BENCHMARK]
+data = load_data()
+returns = data.pct_change()
+candidates = [c for c in data.columns if c not in ("BTC", "ETH", MKT_COL)]
 
 selected = st.sidebar.multiselect(
-    "Tokens to compare vs BTC",
+    "Tokens to plot",
     options=candidates,
-    default=[t for t in ("SOL", "ETH", "ENA", "PENDLE") if t in candidates],
+    default=[t for t in ("SOL", "ENA", "PENDLE", "AAVE") if t in candidates],
 )
-
 window = st.sidebar.slider(
     "Rolling window (days)", min_value=7, max_value=120, value=30, step=1,
     help="1 month ≈ 30 days. Beta is estimated over this many daily returns.",
 )
-
-dmin, dmax = prices.index.min().date(), prices.index.max().date()
-date_range = st.sidebar.date_input(
-    "Date range", value=(dmin, dmax), min_value=dmin, max_value=dmax,
-)
+dmin, dmax = data.index.min().date(), data.index.max().date()
+date_range = st.sidebar.date_input("Date range", value=(dmin, dmax),
+                                   min_value=dmin, max_value=dmax)
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start_d, end_d = date_range
 else:
     start_d, end_d = dmin, dmax
+mask = (data.index.date >= start_d) & (data.index.date <= end_d)
 
 st.sidebar.divider()
 if st.sidebar.button("🔄 Refresh data from exchanges"):
-    with st.spinner("Fetching latest prices from Binance / Gate.io…"):
-        refresh_prices()
+    with st.spinner("Fetching latest prices & rebuilding marketcap index…"):
+        refresh_data()
     st.rerun()
-st.sidebar.caption("Source: Binance spot (USDT pairs); Gate.io for SQD.")
+st.sidebar.caption("Prices: Binance / Gate.io. Marketcap weights: DeFiLlama.")
 
-# ── Main ───────────────────────────────────────────────────────────────────
-st.title("📈 Crypto Beta Dashboard — vs BTC")
-st.caption(
-    f"Rolling **{window}-day** beta of daily returns against {BENCHMARK}. "
-    "β = Cov(token, BTC) / Var(BTC).  β>1 = more volatile than BTC, β<1 = less."
-)
+# ── Main ────────────────────────────────────────────────────────────────────
+st.title("📈 Crypto Beta Dashboard")
+st.caption(f"Rolling **{window}-day** beta of daily returns.  "
+           "β = Cov(token, benchmark) / Var(benchmark).")
 
-if not selected:
-    st.info("Pick one or more tokens in the sidebar to plot their beta.")
-    st.stop()
+tab_btc, tab_mkt = st.tabs(["Beta vs BTC", "Beta vs Marketcap (excl BTC, ETH)"])
 
-mask = (prices.index.date >= start_d) & (prices.index.date <= end_d)
-window_prices = prices.loc[mask]
+with tab_btc:
+    render_beta_tab(returns, selected, window, mask, "BTC", "BTC")
 
-fig = go.Figure()
-latest = {}
-for tok in selected:
-    beta = rolling_beta(prices, tok, window).loc[mask].dropna()
-    if beta.empty:
-        continue
-    fig.add_trace(go.Scatter(x=beta.index, y=beta.values, mode="lines", name=tok))
-    latest[tok] = beta.iloc[-1]
+with tab_mkt:
+    choice = st.radio(
+        "Compare against", [MKT_LABEL, "BTC"], horizontal=True,
+        help="Switch the benchmark used for the beta calculation in this tab.",
+    )
+    bench = MKT_COL if choice == MKT_LABEL else "BTC"
+    render_beta_tab(returns, selected, window, mask, bench, choice)
+    if bench == MKT_COL:
+        st.caption("Benchmark = cap-weighted index of 30+ large alts (SOL, BNB, XRP, "
+                   "ADA, DOGE, TRX, AVAX, LINK, …), excl. BTC, ETH & stablecoins.")
 
-fig.add_hline(y=1.0, line_dash="dash", line_color="gray",
-              annotation_text="β = 1 (moves with BTC)")
-fig.add_hline(y=0.0, line_dash="dot", line_color="lightgray")
-fig.update_layout(
-    height=560, hovermode="x unified",
-    yaxis_title=f"{window}-day rolling β", xaxis_title="Date",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    margin=dict(l=10, r=10, t=40, b=10),
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# Latest beta metrics
-if latest:
-    st.subheader("Latest β")
-    cols = st.columns(len(latest))
-    for col, (tok, val) in zip(cols, latest.items()):
-        col.metric(tok, f"{val:.2f}")
-
-# Coverage + methodology
+# ── Coverage + methodology ───────────────────────────────────────────────────
 with st.expander("ℹ️ Data coverage & methodology"):
+    price_cols = [c for c in data.columns if c != MKT_COL]
     cov = pd.DataFrame({
-        "first": [prices[c].first_valid_index().date() for c in prices.columns],
-        "last": [prices[c].last_valid_index().date() for c in prices.columns],
-        "days": [int(prices[c].notna().sum()) for c in prices.columns],
-    }, index=prices.columns)
+        "first": [data[c].first_valid_index().date() for c in price_cols],
+        "last": [data[c].last_valid_index().date() for c in price_cols],
+        "days": [int(data[c].notna().sum()) for c in price_cols],
+    }, index=price_cols)
     st.dataframe(cov, use_container_width=True)
     st.markdown(
         "- **Returns**: daily simple returns from close prices.\n"
-        f"- **Beta**: rolling Cov(token, {BENCHMARK}) ÷ Var({BENCHMARK}) over the chosen window.\n"
+        "- **Beta**: rolling Cov(token, benchmark) ÷ Var(benchmark) over the window.\n"
+        f"- **{MKT_LABEL}**: a cap-weighted altcoin index. Per-coin circulating "
+        "supply = current marketcap (DeFiLlama) ÷ current price; historical marketcap "
+        "= price × supply; index = mcap-weighted daily returns chained from 100. It "
+        "excludes BTC, ETH and stablecoins, and approximates the non-stable altcoin market.\n"
         "- Newer tokens start at their **exchange-listing date**, not 2022.\n"
         "- Beta appears only after a full window of data is available."
     )
