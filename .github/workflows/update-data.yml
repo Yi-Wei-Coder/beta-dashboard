@@ -1,0 +1,34 @@
+name: Update price data
+
+on:
+  schedule:
+    # 01:30 UTC daily — after the prior day's daily candles have closed.
+    - cron: "30 1 * * *"
+  workflow_dispatch: {}        # allow manual runs from the Actions tab
+
+permissions:
+  contents: write              # needed to commit the refreshed CSV back
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install pandas requests
+
+      - name: Incremental price fetch
+        run: python fetch_data.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/prices.csv
+          git diff --staged --quiet || git commit -m "chore: daily price update"
+          git push
